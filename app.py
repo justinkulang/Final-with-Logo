@@ -326,6 +326,18 @@ def logout():
     return jsonify({'success': True, 'message': _('Logged out successfully from web app and Mikrotik.')})
 
 def _generate_vouchers_page_html(vouchers: list, hotspot_login_url: str, include_print_button: bool = True) -> str:
+    # Read the logo file and encode it as Base64
+    logo_path = os.path.join(get_base_path(), 'static', 'images', 'The IT Dad new logo.png')
+    logo_base64 = ""
+    try:
+        with open(logo_path, "rb") as image_file:
+            logo_base64 = base64.b64encode(image_file.read()).decode('utf-8')
+        logo_mime_type = "image/png" # Assuming PNG, adjust if it could be other types
+        logo_data_url = f"data:{logo_mime_type};base64,{logo_base64}"
+    except FileNotFoundError:
+        logger.warning(f"Logo file not found at {logo_path} for voucher generation.")
+        logo_data_url = "" # Fallback or handle error
+
     html_parts = ["""
     <!DOCTYPE html>
     <html lang="en">
@@ -384,8 +396,8 @@ def _generate_vouchers_page_html(vouchers: list, hotspot_login_url: str, include
             }
             .voucher-header {
                 background-color: #fff;
-                color: #007bff;
-                border-bottom: 1.5px solid #007bff;
+                color: #2A7ABF; /* Updated to Bright Blue from logo */
+                border-bottom: 1.5px solid #2A7ABF; /* Updated to Bright Blue */
                 padding: 5px 8px;
                 text-align: center;
                 font-weight: bold;
@@ -434,7 +446,7 @@ def _generate_vouchers_page_html(vouchers: list, hotspot_login_url: str, include
             }
             .voucher-details span { 
                 font-family: 'Courier New', monospace;
-                color: #007bff;
+                 color: #2A7ABF; /* Updated to Bright Blue */
                 background-color: #f0f2f5;
                 padding: 2px 5px;
                 border-radius: 4px;
@@ -503,7 +515,10 @@ def _generate_vouchers_page_html(vouchers: list, hotspot_login_url: str, include
 
         html_parts.append(f"""
         <div class="voucher">
-            <div class="voucher-header">📶 The IT Dad</div>
+            <div class="voucher-header">""")
+        if logo_data_url:
+            html_parts.append(f"""<img src="{logo_data_url}" alt="Logo" style="max-height: 16px; margin-right: 8px; vertical-align: middle;">""") # Reduced max-height
+        html_parts.append("""Hotspot Voucher</div>
             <div class="voucher-content">
                 <div class="voucher-qr">
         """)

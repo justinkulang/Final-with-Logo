@@ -10,8 +10,8 @@
     <style>
         :root {
             /* Core Palette */
-            --primary-color: #1abc9c;
-            --primary-color-darker: #16a085;
+            --primary-color: #2A7ABF; /* Updated: Bright Blue */
+            --primary-color-darker: #1F5A99; /* Updated: Darker Bright Blue */
             --secondary-color-static: #7f8c8d;
             --success-color: #2ecc71;
             --danger-color: #e74c3c;
@@ -81,10 +81,15 @@
             transition: background-color 0.3s ease, box-shadow 0.3s ease;
         }
         .login-container h2 {
-            color: var(--primary-color);
+            /* color: var(--primary-color); */ /* Color will be from logo image */
             margin-bottom: 0.5rem;
             font-size: 2rem;
             font-weight: 700;
+        }
+        .login-container .logo-image {
+            max-width: 200px; /* Updated size */
+            height: auto;
+            margin-bottom: 0.25rem; /* Space between logo and subtitle */
         }
         .login-container .subtitle {
             color: var(--theme-text-secondary);
@@ -128,7 +133,7 @@
         .form-group input:focus {
             outline: none;
             border-color: var(--primary-color);
-            box-shadow: 0 0 0 0.2rem rgba(26, 188, 156, .25);
+            box-shadow: 0 0 0 0.2rem rgba(42, 122, 191, .25); /* Updated focus shadow for Bright Blue */
         }
         .login-button {
             width: 100%;
@@ -170,7 +175,7 @@
         .login-button:focus {
             outline: 2px solid var(--primary-color-darker);
             outline-offset: 2px;
-            box-shadow: 0 0 0 0.2rem rgba(26, 188, 156, .25);
+            box-shadow: 0 0 0 0.2rem rgba(42, 122, 191, .25); /* Updated focus shadow for Bright Blue */
         }
         .login-button .fas { 
             font-size: 1rem;
@@ -251,7 +256,7 @@
     <div class="login-container">
         <!-- Web App Login Form -->
         <div id="appLoginSection">
-            <h2>The IT Dad</h2>
+            <h2><img src="{{ url_for('static', filename='images/The IT Dad new logo.png') }}" alt="The IT Dad Logo" class="logo-image"></h2>
             <p class="subtitle">Hotspot Manager Login</p>
             <form id="appLoginForm" method="POST" action="{{ url_for('app_login_route') }}">
                 <div class="form-group">
@@ -271,7 +276,7 @@
 
         <!-- Mikrotik Connection Form (Initially Hidden) -->
         <div id="mikrotikLoginSection" style="display: none;">
-            <h2>The IT Dad</h2>
+            <h2><img src="{{ url_for('static', filename='images/The IT Dad new logo.png') }}" alt="The IT Dad Logo" class="logo-image"></h2>
             <p class="subtitle">Connect to Mikrotik Router</p>
             <form id="mikrotikLoginForm"> 
                 <div class="form-group">
