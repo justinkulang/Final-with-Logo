@@ -376,14 +376,14 @@ def _generate_vouchers_page_html(vouchers: list, hotspot_login_url: str, include
             }
             .voucher-grid {
                 display: grid;
-                grid-template-columns: repeat(auto-fit, 80mm);
-                gap: 10mm;
-                padding: 10mm;
+                grid-template-columns: repeat(auto-fit, 70mm); /* Updated width */
+                gap: 8mm; /* Updated gap */
+                padding: 10mm; /* Keep padding or adjust if needed */
                 justify-content: center;
             }
             .voucher {
-                width: 80mm;
-                height: 60mm;
+                width: 70mm; /* Updated width */
+                height: 50mm; /* Updated height */
                 background-color: #fff;
                 border: 1px solid #ddd;
                 border-radius: 8px;
@@ -504,6 +504,13 @@ def _generate_vouchers_page_html(vouchers: list, hotspot_login_url: str, include
     for voucher in vouchers:
         username = voucher.get('username', 'N/A')
         password = voucher.get('password', 'N/A')
+        limit_uptime = voucher.get('limit-uptime', '') # Get limit-uptime
+        profile_name = voucher.get('profile', '') # Get profile, though not currently displayed
+
+        time_limit_display = "Unlimited"
+        if limit_uptime and limit_uptime != '0s':
+            time_limit_display = limit_uptime
+
         qr_code_b64 = None
 
         if QRCODE_AVAILABLE and hotspot_login_url:
@@ -535,6 +542,8 @@ def _generate_vouchers_page_html(vouchers: list, hotspot_login_url: str, include
                     <p><span>{username}</span></p>
                     <p><strong>Password:</strong></p>
                     <p><span>{password}</span></p>
+                    <p><strong>Time Limit:</strong></p>
+                    <p><span>{time_limit_display}</span></p>
                 </div>
             </div>
             <div class="voucher-footer">📞 +211 923 616 820 | ✉️ justinkulang@gmail.com</div>
@@ -1266,7 +1275,7 @@ def bulk_create_users():
     created_credentials = []
     errors = []
     
-    for _ in range(int(number_of_users)):
+    for i in range(int(number_of_users)): # Changed loop variable from _ to i
         random_username_part = ''.join(random.choices(username_chars, k=username_length))
         username = username_prefix + random_username_part
         password = ''.join(random.choices(password_chars, k=password_length))
@@ -1281,7 +1290,12 @@ def bulk_create_users():
 
         success, msg = router_os_service.create_hotspot_user(user_data)
         if success:
-            created_credentials.append({'username': username, 'password': password})
+            created_credentials.append({
+                'username': username,
+                'password': password,
+                'limit-uptime': user_data.get('limit-uptime', 'Unlimited'), # Get from user_data used for creation
+                'profile': user_data.get('profile', '') # Get profile from user_data
+            })
         else:
             errors.append({'username': username, 'error': msg})
 
@@ -1432,7 +1446,12 @@ def export_users_route():
 
     elif export_format == 'html_voucher' or export_format == 'pdf_voucher':
         vouchers_data = [
-            {'username': u.get('name'), 'password': u.get('password')} for u in users
+            {
+                'username': u.get('name'),
+                'password': u.get('password'),
+                'limit-uptime': u.get('limit-uptime', 'Unlimited'),
+                'profile': u.get('profile', '')
+            } for u in users
         ]
         login_url = app_config['mikrotik'].get('hotspot_login_url', '')
         filename_profile_part = profile_filter if profile_filter and profile_filter != 'All Profiles' else 'all'
