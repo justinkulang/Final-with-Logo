@@ -671,12 +671,34 @@
                         </select>
                     </div>
                 </div>
+                <div class="form-grid" style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--theme-border-light);">
+                    <div>
+                        <label for="bulkActionSelect" style="margin-bottom: .25rem;">Bulk Actions:</label>
+                        <select id="bulkActionSelect" class="form-group" style="margin-bottom: .5rem; width: auto; display: inline-block; min-width: 150px;">
+                            <option value="">Select Action...</option>
+                            <option value="enable">Enable Selected</option>
+                            <option value="disable">Disable Selected</option>
+                            <option value="changeProfile">Change Profile for Selected</option>
+                            <option value="delete">Delete Selected</option>
+                        </select>
+                        <select id="bulkActionProfileTarget" class="form-group" style="margin-bottom: .5rem; width: auto; display: none; min-width: 150px; margin-left: .5rem;"></select>
+                        <button id="applyBulkActionButton" class="btn btn-primary btn-sm" style="margin-left: .5rem;">Apply</button>
+                    </div>
+                </div>
                 <div class="table-container">
                     <table id="usersTable">
                         <thead>
                             <tr>
-                                <th>Username</th><th>Profile</th><th>Status</th><th>Time Limit</th>
-                                <th>Data Limit</th><th>Uptime</th><th>Data Used</th><th>Comment</th><th>Actions</th>
+                                <th><input type="checkbox" id="selectAllUsersCheckbox" title="Select All"></th>
+                                <th data-sort-key="name">Username <i class="fas fa-sort"></i></th>
+                                <th data-sort-key="profile">Profile <i class="fas fa-sort"></i></th>
+                                <th data-sort-key="disabled">Status <i class="fas fa-sort"></i></th>
+                                <th data-sort-key="limit-uptime">Time Limit <i class="fas fa-sort"></i></th>
+                                <th data-sort-key="limit-bytes-total">Data Limit <i class="fas fa-sort"></i></th>
+                                <th data-sort-key="uptime">Uptime <i class="fas fa-sort"></i></th>
+                                <th data-sort-key="total-data-used">Data Used <i class="fas fa-sort"></i></th>
+                                <th data-sort-key="comment">Comment <i class="fas fa-sort"></i></th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1034,6 +1056,51 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Setup static translated UI elements not covered by other functions
     setupStaticTranslations();
+
+    // Setup table sorting for Users table
+    setupUserTableSorting();
+
+    // Setup bulk action UI listeners
+    const selectAllCheckbox = document.getElementById('selectAllUsersCheckbox');
+    const bulkActionSelect = document.getElementById('bulkActionSelect');
+    const bulkActionProfileTarget = document.getElementById('bulkActionProfileTarget');
+    const applyBulkActionButton = document.getElementById('applyBulkActionButton');
+
+    if (selectAllCheckbox) {
+        selectAllCheckbox.addEventListener('change', function() {
+            document.querySelectorAll('.user-checkbox').forEach(checkbox => {
+                checkbox.checked = this.checked;
+            });
+        });
+    }
+
+    if (bulkActionSelect) {
+        bulkActionSelect.addEventListener('change', function() {
+            if (this.value === 'changeProfile') {
+                bulkActionProfileTarget.style.display = 'inline-block';
+                // Populate bulkActionProfileTarget if not already populated
+                if (bulkActionProfileTarget.options.length <= 1) { // Assuming a default "Select Profile..." option
+                    const defaultOption = bulkActionProfileTarget.value === "" ? bulkActionProfileTarget.options[0] : null;
+                    bulkActionProfileTarget.innerHTML = `<option value="">${getTranslation('-- Select Profile --')}</option>`; // Default/placeholder
+                    currentProfiles.forEach(p => {
+                        if(p.name) bulkActionProfileTarget.add(new Option(p.name, p.name));
+                    });
+                    if(defaultOption && currentProfiles.some(p => p.name === defaultOption.value)) {
+                        bulkActionProfileTarget.value = defaultOption.value;
+                    } else if (bulkActionProfileTarget.options.length > 1) {
+                        // If no valid previous selection or default, and there are profiles, select first actual profile
+                        // bulkActionProfileTarget.value = bulkActionProfileTarget.options[1].value;
+                    }
+                }
+            } else {
+                bulkActionProfileTarget.style.display = 'none';
+            }
+        });
+    }
+
+    if (applyBulkActionButton) {
+        applyBulkActionButton.addEventListener('click', handleApplyBulkAction);
+    }
 
 
     // Setup filter listeners
@@ -1694,9 +1761,10 @@ function filterAndDisplayUsers() {
 
     tbody.innerHTML = filtered.map(user => `
         <tr>
+            <td><input type="checkbox" class="user-checkbox" data-username="${user.name}"></td>
             <td>${user.name}</td>
             <td>${user.profile || ''}</td>
-            <td><span class="status-badge ${user.disabled === 'true' ? 'status-disabled' : 'status-active'}">${user.disabled === 'true' ? 'Disabled' : 'Active'}</span></td>
+            <td><span class="status-badge ${user.disabled === 'true' ? 'status-disabled' : 'status-active'}">${user.disabled === 'true' ? getTranslation('Disabled') : getTranslation('Active')}</span></td>
             <td>${user['limit-uptime'] || 'Unlimited'}</td>
             <td>${formatBytes(user['limit-bytes-total'])}</td>
             <td>${user.uptime || '0s'}</td>
@@ -1801,6 +1869,10 @@ async function handleBulkCreateUsers(e) {
 
     const exportHTMLBtn = document.getElementById('exportVouchersHTMLButton');
     const exportPDFBtn = document.getElementById('exportVouchersPDFButton'); 
+    const form = e.target;
+    const submitButton = form.querySelector('button[type="submit"]');
+    const originalButtonHTML = submitButton.innerHTML;
+
     const resultDisplayDiv = document.getElementById('bulkCreateResultDisplay');
     const credentialsTextArea = document.getElementById('bulkCreateCredentials');
 
@@ -1811,30 +1883,44 @@ async function handleBulkCreateUsers(e) {
     credentialsTextArea.value = '';
     lastGeneratedBatchCredentials = []; // Clear previous batch
 
+    submitButton.disabled = true;
+    submitButton.innerHTML = `<span class="loading-spinner"></span> ${getTranslation('Generating Vouchers...')}`;
 
-    const result = await apiCall('/bulk-create-users', { method: 'POST', body: JSON.stringify(payload) });
-    if (result) {
-        showAlert('globalAlert', result.success ? 'success' : 'danger', result.message);
-        if (result.created_credentials && result.created_credentials.length > 0) {
-            lastGeneratedBatchCredentials = result.created_credentials; // Store for printing/viewing
-            resultDisplayDiv.style.display = 'block';
-            credentialsTextArea.value = result.created_credentials
-                .map(c => `Username: ${c.username}\tPassword: ${c.password}`)
-                .join('\n');
-            if(exportHTMLBtn) exportHTMLBtn.style.display = 'inline-flex'; 
-            if(exportPDFBtn) exportPDFBtn.style.display = 'inline-flex'; 
-            await loadUsers(); // Refresh user list as new users were added
-            await loadDashboardStats(); // Refresh stats
+    try {
+        const result = await apiCall('/bulk-create-users', { method: 'POST', body: JSON.stringify(payload) });
+        if (result) {
+            showAlert('globalAlert', result.success ? 'success' : 'danger', result.message);
+            if (result.created_credentials && result.created_credentials.length > 0) {
+                lastGeneratedBatchCredentials = result.created_credentials; // Store for printing/viewing
+                resultDisplayDiv.style.display = 'block';
+                credentialsTextArea.value = result.created_credentials
+                    .map(c => `Username: ${c.username}\tPassword: ${c.password}`)
+                    .join('\n');
+                if(exportHTMLBtn) exportHTMLBtn.style.display = 'inline-flex';
+                if(exportPDFBtn) exportPDFBtn.style.display = 'inline-flex';
+                await loadUsers(); // Refresh user list as new users were added
+                await loadDashboardStats(); // Refresh stats
+            } else {
+                // Ensure buttons are hidden if no credentials or error
+                if(exportHTMLBtn) exportHTMLBtn.style.display = 'none';
+                if(exportPDFBtn) exportPDFBtn.style.display = 'none';
+            }
         } else {
-            // Ensure buttons are hidden if no credentials or error
+            // If apiCall returns null (e.g. network error), ensure buttons and results area are hidden
             if(exportHTMLBtn) exportHTMLBtn.style.display = 'none';
             if(exportPDFBtn) exportPDFBtn.style.display = 'none';
+            resultDisplayDiv.style.display = 'none';
         }
-    } else {
-        // If apiCall returns null (e.g. network error), ensure buttons and results area are hidden
+    } catch (error) {
+        // This catch is mostly for completeness, as apiCall should handle its own errors.
+        logger.error("Bulk create user submission failed:", error);
+        showAlert('globalAlert', 'danger', getTranslation('An unexpected error occurred during voucher generation.'));
         if(exportHTMLBtn) exportHTMLBtn.style.display = 'none';
         if(exportPDFBtn) exportPDFBtn.style.display = 'none';
-        resultDisplayDiv.style.display = 'none'; 
+        resultDisplayDiv.style.display = 'none';
+    } finally {
+        submitButton.disabled = false;
+        submitButton.innerHTML = originalButtonHTML;
     }
 }
 
@@ -1911,16 +1997,32 @@ async function deleteProfile(id, name) {
 }
 
 async function deleteExpiredUsers() {
+    const button = event.target; // Assuming this is called from a button click
+    const originalButtonHTML = button.innerHTML;
+
     if (!confirm(getTranslation('confirmDeleteExpiredUsers'))) return;
-    const result = await apiCall('/delete-expired-users', { method: 'POST' });
-    if(result && result.success) {
-        showAlert('globalAlert', 'success', result.message + (result.deleted_count ? ` Deleted ${result.deleted_count} user(s).` : ''));
-        await loadUsers();
-        await loadDashboardStats();
-    } else if (result) { // API call was made, but operation wasn't successful (e.g. success:false from backend)
-        showAlert('globalAlert', 'warning', result.message || getTranslation('Operation failed, no users deleted.'));
+
+    button.disabled = true;
+    button.innerHTML = `<span class="loading-spinner"></span> ${getTranslation('Deleting...')}`;
+    showGlobalSpinner(true); // Keep global spinner as well for consistency
+
+    try {
+        const result = await apiCall('/delete-expired-users', { method: 'POST' });
+        if(result && result.success) {
+            showAlert('globalAlert', 'success', result.message + (result.deleted_count ? ` Deleted ${result.deleted_count} user(s).` : ''));
+            await loadUsers();
+            await loadDashboardStats();
+        } else if (result) {
+            showAlert('globalAlert', 'warning', result.message || getTranslation('Operation failed, no users deleted.'));
+        }
+    } catch (error) {
+        logger.error("Delete expired users failed:", error);
+        showAlert('globalAlert', 'danger', getTranslation('An error occurred while deleting expired users.'));
+    } finally {
+        button.disabled = false;
+        button.innerHTML = originalButtonHTML;
+        showGlobalSpinner(false);
     }
-    // If result is null (apiCall failed due to network etc.), apiCall itself shows an alert.
 }
 
 async function handleDeleteUsersByProfile() {
@@ -1936,15 +2038,28 @@ async function handleDeleteUsersByProfile() {
         return;
     }
 
-    const result = await apiCall(`/users/delete-by-profile/${encodeURIComponent(profileName)}`, { method: 'DELETE' });
+    const button = document.getElementById('deleteByProfileButton'); // Specific button ID
+    const originalButtonHTML = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = `<span class="loading-spinner"></span> ${getTranslation('Deleting...')}`;
+    showGlobalSpinner(true);
 
-    if (result && result.success) {
-        // Assuming result.message is already translated by the backend
-        showAlert('globalAlert', 'success', result.message || getTranslation('Successfully processed users for profile {0}. Deleted {1} user(s).', profileName, result.deleted_count));
-        await loadUsers();
-        await loadDashboardStats();
-    } else if (result) { 
-        showAlert('globalAlert', 'danger', result.message || getTranslation('Failed to delete users from profile {0}.', profileName));
+    try {
+        const result = await apiCall(`/users/delete-by-profile/${encodeURIComponent(profileName)}`, { method: 'DELETE' });
+        if (result && result.success) {
+            showAlert('globalAlert', 'success', result.message || getTranslation('Successfully processed users for profile {0}. Deleted {1} user(s).', profileName, result.deleted_count));
+            await loadUsers();
+            await loadDashboardStats();
+        } else if (result) {
+            showAlert('globalAlert', 'danger', result.message || getTranslation('Failed to delete users from profile {0}.', profileName));
+        }
+    } catch (error) {
+        logger.error("Delete by profile failed:", error);
+        showAlert('globalAlert', 'danger', getTranslation('An error occurred while deleting users by profile.'));
+    } finally {
+        button.disabled = false;
+        button.innerHTML = `<i class="fas fa-trash-alt"></i> ${getTranslation('Delete Users by Profile')}`; // Restore original with icon
+        showGlobalSpinner(false);
     }
 }
 
@@ -1963,14 +2078,28 @@ async function handleDeleteUsersByStatus() {
         return;
     }
 
-    const result = await apiCall(`/users/delete-by-active-status/${status}`, { method: 'DELETE' });
+    const button = document.getElementById('deleteByStatusButton'); // Specific button ID
+    const originalButtonHTML = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = `<span class="loading-spinner"></span> ${getTranslation('Deleting...')}`;
+    showGlobalSpinner(true);
 
-    if (result && result.success) {
-        showAlert('globalAlert', 'success', result.message || getTranslation('Successfully processed {0} users. Deleted {1} user(s).', statusText, result.deleted_count));
-        await loadUsers();
-        await loadDashboardStats();
-    } else if (result) {
-        showAlert('globalAlert', 'danger', result.message || getTranslation('Failed to delete {0} users.', statusText));
+    try {
+        const result = await apiCall(`/users/delete-by-active-status/${status}`, { method: 'DELETE' });
+        if (result && result.success) {
+            showAlert('globalAlert', 'success', result.message || getTranslation('Successfully processed {0} users. Deleted {1} user(s).', statusText, result.deleted_count));
+            await loadUsers();
+            await loadDashboardStats();
+        } else if (result) {
+            showAlert('globalAlert', 'danger', result.message || getTranslation('Failed to delete {0} users.', statusText));
+        }
+    } catch (error) {
+        logger.error("Delete by status failed:", error);
+        showAlert('globalAlert', 'danger', getTranslation('An error occurred while deleting users by status.'));
+    } finally {
+        button.disabled = false;
+        button.innerHTML = `<i class="fas fa-user-slash"></i> ${getTranslation('Delete Users by Status')}`; // Restore original with icon
+        showGlobalSpinner(false);
     }
 }
 
@@ -2262,6 +2391,167 @@ function formatBytes(bytes) {
     const i = Math.floor(Math.log(numBytes) / Math.log(k));
     return `${parseFloat((numBytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 }
+
+// --- Table Sorting for Users Table ---
+let userSortKey = 'name';
+let userSortOrder = 'asc';
+
+function setupUserTableSorting() {
+    const headers = document.querySelectorAll('#usersTable th[data-sort-key]');
+    headers.forEach(header => {
+        header.style.cursor = 'pointer';
+        header.addEventListener('click', () => {
+            const newSortKey = header.dataset.sortKey;
+            if (userSortKey === newSortKey) {
+                userSortOrder = userSortOrder === 'asc' ? 'desc' : 'asc';
+            } else {
+                userSortKey = newSortKey;
+                userSortOrder = 'asc';
+            }
+            // Update visual indicators
+            headers.forEach(h => {
+                const icon = h.querySelector('i.fa-sort, i.fa-sort-up, i.fa-sort-down');
+                if (icon) {
+                    icon.classList.remove('fa-sort-up', 'fa-sort-down');
+                    icon.classList.add('fa-sort');
+                }
+            });
+            const currentIcon = header.querySelector('i');
+            if (currentIcon) {
+                currentIcon.classList.remove('fa-sort');
+                currentIcon.classList.add(userSortOrder === 'asc' ? 'fa-sort-up' : 'fa-sort-down');
+            }
+
+            sortAndDisplayUsers();
+        });
+    });
+}
+
+function sortAndDisplayUsers() {
+    currentUsers.sort((a, b) => {
+        let valA, valB;
+
+        // Special handling for data-based fields
+        if (userSortKey === 'limit-bytes-total' || userSortKey === 'total-data-used') {
+            const parseBytes = (valStr) => {
+                if (valStr === null || valStr === undefined || typeof valStr === 'number') return Number(valStr) || 0;
+                if (typeof valStr !== 'string' || valStr.toLowerCase() === 'unlimited' || valStr === '') return Infinity; // Treat "Unlimited" or empty as very large for asc, needs adjustment for desc
+
+                // This is a simplified parser from formatBytes, assumes Mikrotik returns raw bytes
+                // If formatBytes is used for display, original values should be numbers
+                return parseInt(valStr) || 0;
+            };
+            if (userSortKey === 'limit-bytes-total') {
+                valA = parseBytes(a['limit-bytes-total']);
+                valB = parseBytes(b['limit-bytes-total']);
+            } else { // total-data-used
+                 valA = (parseInt(a['bytes-in'] || 0) + parseInt(a['bytes-out'] || 0));
+                 valB = (parseInt(b['bytes-in'] || 0) + parseInt(b['bytes-out'] || 0));
+            }
+        } else if (userSortKey === 'disabled') { // Boolean sort (active first)
+            valA = a.disabled === 'true';
+            valB = b.disabled === 'true';
+        } else if (userSortKey === 'uptime' || userSortKey === 'limit-uptime') { // RouterOS time string sort
+            const parseRosTime = (timeStr) => {
+                if (!timeStr || typeof timeStr !== 'string') return 0;
+                let totalSeconds = 0;
+                const weeks = timeStr.match(/(\d+)w/);
+                const days = timeStr.match(/(\d+)d/);
+                const hours = timeStr.match(/(\d+)h/);
+                const minutes = timeStr.match(/(\d+)m/);
+                const seconds = timeStr.match(/(\d+)s/);
+                if (weeks) totalSeconds += parseInt(weeks[1]) * 7 * 24 * 60 * 60;
+                if (days) totalSeconds += parseInt(days[1]) * 24 * 60 * 60;
+                if (hours) totalSeconds += parseInt(hours[1]) * 60 * 60;
+                if (minutes) totalSeconds += parseInt(minutes[1]) * 60;
+                if (seconds) totalSeconds += parseInt(seconds[1]);
+                // Handle "unlimited" or non-parsable as very large or very small depending on sort order preference
+                if (timeStr.toLowerCase() === 'unlimited' || totalSeconds === 0 && timeStr !== '0s') return userSortOrder === 'asc' ? Infinity : -Infinity;
+                return totalSeconds;
+            };
+            valA = parseRosTime(a[userSortKey]);
+            valB = parseRosTime(b[userSortKey]);
+        } else { // Default string/locale compare
+            valA = (a[userSortKey] || '').toString().toLowerCase();
+            valB = (b[userSortKey] || '').toString().toLowerCase();
+        }
+
+        if (valA < valB) return userSortOrder === 'asc' ? -1 : 1;
+        if (valA > valB) return userSortOrder === 'asc' ? 1 : -1;
+        return 0;
+    });
+    filterAndDisplayUsers(); // Re-filter and display after sorting
+}
+
+async function handleApplyBulkAction() {
+    const selectedAction = document.getElementById('bulkActionSelect').value;
+    const selectedUsernames = Array.from(document.querySelectorAll('.user-checkbox:checked'))
+                                   .map(cb => cb.dataset.username);
+
+    if (!selectedAction) {
+        showAlert('globalAlert', 'warning', getTranslation('Please select a bulk action.'));
+        return;
+    }
+    if (selectedUsernames.length === 0) {
+        showAlert('globalAlert', 'warning', getTranslation('Please select at least one user.'));
+        return;
+    }
+
+    let payload = { usernames: selectedUsernames };
+    let endpoint = '';
+    let actionVerb = ''; // For confirmation message
+
+    switch (selectedAction) {
+        case 'enable':
+            endpoint = '/users/bulk-enable';
+            actionVerb = 'enable';
+            break;
+        case 'disable':
+            endpoint = '/users/bulk-disable';
+            actionVerb = 'disable';
+            break;
+        case 'changeProfile':
+            const targetProfile = document.getElementById('bulkActionProfileTarget').value;
+            if (!targetProfile) {
+                showAlert('globalAlert', 'warning', getTranslation('Please select a target profile.'));
+                return;
+            }
+            payload.profile = targetProfile;
+            endpoint = '/users/bulk-change-profile';
+            actionVerb = `change profile to "${targetProfile}" for`;
+            break;
+        case 'delete':
+            endpoint = '/users/bulk-delete';
+            actionVerb = 'delete';
+            break;
+        default:
+            showAlert('globalAlert', 'danger', getTranslation('Invalid bulk action selected.'));
+            return;
+    }
+
+    if (!confirm(getTranslation('Are you sure you want to {0} {1} selected user(s)?', actionVerb, selectedUsernames.length))) {
+        return;
+    }
+
+    showGlobalSpinner(true);
+    try {
+        const result = await apiCall(endpoint, { method: 'POST', body: JSON.stringify(payload) });
+        if (result) { // apiCall handles null for network errors already
+            showAlert('globalAlert', result.success ? 'success' : 'danger', result.message || getTranslation('Bulk action completed.'));
+            if (result.success) {
+                await loadUsers(); // Refresh user list
+                await loadDashboardStats(); // Refresh stats
+                document.getElementById('selectAllUsersCheckbox').checked = false; // Uncheck select all
+            }
+        }
+    } catch (error) { // Should be caught by apiCall, but as a fallback
+        logger.error(`Bulk action failed: ${error}`);
+        showAlert('globalAlert', 'danger', getTranslation('An unexpected error occurred during the bulk action.'));
+    } finally {
+        showGlobalSpinner(false);
+    }
+}
+
 </script>
 </body>
 </html>

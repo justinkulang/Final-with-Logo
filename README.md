@@ -13,6 +13,7 @@ This project provides a web-based dashboard for managing Mikrotik Hotspot users,
 *   **Secure Access:**
     *   Web application login system using Flask-Login (session-based).
     *   CSRF protection for all state-changing operations using Flask-WTF.
+    *   Rate limiting for login attempts using Flask-Limiter.
 *   **Internationalization (i18n):** Support for multiple languages (English, Arabic, French).
 *   **Configurable:** Key settings managed via `config.json`.
 *   **Production Ready:** Includes Gunicorn configuration and guidance for HTTPS setup.
@@ -61,8 +62,21 @@ This project provides a web-based dashboard for managing Mikrotik Hotspot users,
     *   **Mikrotik Connection:**
         *   Configure your Mikrotik router details (host, API username, API password, port) either by:
             1.  Manually editing `config.json` before the first run.
-            2.  Using the web application's "Settings" page after logging in with the default admin credentials. The application will not be able to manage the router until these details are correctly configured.
-    *   **Log File Location:** The default log file is `mikrotik_dashboard.log`. You can change this in `config.json` under `server.log_file`.
+            2.  Using the web application's "Settings" page after logging in. The application will not be able to manage the router until these details are correctly configured.
+    *   **Log File Location:** The default log file is `mikrotik_dashboard.log`. You can change this in `config.json` under `server.log_file`. An `audit.log` is also created.
+
+4.  **Initialize Database and Create Admin User:**
+    The application now uses a SQLite database to store admin user credentials.
+    *   **Initialize the database:**
+        ```bash
+        flask init-db
+        ```
+        This command creates the `mikrotik_dashboard_users.db` file (or the path specified by `DATABASE_URL` env var).
+    *   **Create an admin user:**
+        ```bash
+        flask create-admin
+        ```
+        You will be prompted to enter a username and password for the dashboard admin.
 
 ## Running the Application
 
@@ -89,14 +103,79 @@ For production, it is highly recommended to use a production-grade WSGI server l
 2.  **Further Production Setup:**
     Refer to the "Production Deployment" section below for crucial details on HTTPS, environment variables, etc.
 
+## Docker Deployment (Recommended for Ease of Use)
+
+This application can be easily deployed using Docker and Docker Compose.
+
+1.  **Prerequisites:**
+    *   Docker installed: [Get Docker](https://docs.docker.com/get-docker/)
+    *   Docker Compose installed (usually comes with Docker Desktop).
+
+2.  **Configuration:**
+    *   A `docker-compose.yml` file is provided.
+    *   **Important:** Edit `docker-compose.yml` and set a strong `FLASK_SECRET_KEY`.
+    *   (Optional) Create a `config.json` in the project root if you want to pre-configure Mikrotik details or logging paths. If you do, ensure paths for logs/DB in `config.json` match volume mounts or are relative to `/app/data` if you want them in the persistent volume. E.g.:
+        ```json
+        "server": {
+            "log_file": "data/mikrotik_dashboard.log", // To store in the 'app_data' volume
+            "audit_log_file": "data/audit.log"      // To store in the 'app_data' volume
+        }
+        ```
+        If `config.json` is not provided, a default one will be created inside the container (less ideal for production config persistence if the container is ephemeral without mounted config). The `docker-compose.yml` example mounts `./config.json` and `./app_data`.
+
+3.  **Build and Run:**
+    ```bash
+    docker-compose up --build -d
+    ```
+    The `-d` flag runs it in detached mode.
+
+4.  **Initialize Database and Create Admin (First Run):**
+    After the container is running:
+    ```bash
+    docker-compose exec web flask init-db
+    docker-compose exec web flask create-admin
+    ```
+    Follow the prompts to create your admin user.
+
+5.  **Accessing the Application:**
+    The application should be available at `http://localhost:5000` (or the port you mapped in `docker-compose.yml`).
+
+6.  **Stopping:**
+    ```bash
+    docker-compose down
+    ```
+
+## API Documentation
+
+For details on the available API endpoints, please refer to [API_DOCUMENTATION.md](API_DOCUMENTATION.md).
+
+### Rate Limiting
+*   The application uses `Flask-Limiter` to protect against brute-force login attacks.
+*   Default limits are `5 per minute` for the login route and global defaults of `200 per day, 50 per hour`.
+*   For multi-process deployments (e.g., multiple Gunicorn workers), the default `memory://` storage for Flask-Limiter will not work correctly across processes. You should configure a central store like Redis or Memcached.
+    Example for `config.json` (if you were to extend it, though typically limiter config is in `app.py` or env vars):
+    ```json
+    "RATELIMIT_STORAGE_URL": "redis://localhost:6379/1"
+    ```
+    And in `app.py`, you would initialize `Limiter` with `app.config.from_json('config.json')` or similar, or directly use environment variables for `RATELIMIT_STORAGE_URL`.
+
 ## Production Deployment
 
 When deploying this application to a production environment, several considerations should be taken into account for security, reliability, and performance.
+
+### Admin User
+*   The dashboard admin user is now managed in a database (SQLite by default). Ensure you have created an admin user using `flask create-admin` after `flask init-db`.
+*   The `app_admin` section in `config.json` is no longer used for admin credentials.
 
 ### `SECRET_KEY` Configuration
 For session security, Flask uses a `SECRET_KEY`.
 *   **Action Required:** Set the `FLASK_SECRET_KEY` environment variable to a strong, unique, and random string. Do not use the default fallback key in production.
 *   The application will use the environment variable if set, otherwise, it falls back to a hardcoded development key and issues a warning.
+
+### Database Configuration
+*   By default, a SQLite database named `mikrotik_dashboard_users.db` is created in the application directory.
+*   For production, you might consider using a more robust database. You can configure the database URI using the `DATABASE_URL` environment variable (e.g., `DATABASE_URL="postgresql://user:pass@host:port/dbname"`).
+*   Ensure the database file (if SQLite) or the database service is properly backed up.
 
 ### Debug Mode
 *   **Action Required:** Ensure that `debug` is set to `false` in the `server` section of your `config.json` for production. The application now defaults this to `false` if the key is missing or a new config is generated.
@@ -167,6 +246,7 @@ server {
 ### Logging
 *   The application is configured to log to both the console and a file.
 *   The default log file is `mikrotik_dashboard.log` (configurable in `config.json` via `server.log_file`).
+*   An `audit.log` file (configurable via `server.audit_log_file` in `config.json`) is generated to record significant security-related events such as logins, user management actions, and configuration changes.
 *   Console and file log levels are also configurable in `config.json` (`server.log_level_console`, `server.log_level_file`).
 *   When using Gunicorn, its own logging mechanisms (e.g., `accesslog`, `errorlog` in `gunicorn_config.py`) can also be used to capture stdout/stderr from the application.
 

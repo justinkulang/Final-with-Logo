@@ -1,0 +1,72 @@
+2025-06-26 17:39:35,783 - app - INFO - File logging configured to: mikrotik_dashboard.log with level: INFO
+2025-06-26 17:39:35,784 - app - INFO - Audit logging configured to: audit.log
+2025-06-26 17:39:36,415 - app - INFO - User 'testadmin_login' logged in successfully to the web application.
+2025-06-26 17:39:36,422 - app - INFO - Attempting to connect to Mikrotik: 192.168.1.62:8728 (SSL: False)
+2025-06-26 17:39:46,433 - app - ERROR - Mikrotik connection failed in get_mikrotik_api: timed out
+2025-06-26 17:39:46,443 - app - WARNING - Failed login attempt for app user 'wronguser'.
+2025-06-26 17:39:46,589 - app - INFO - User not authenticated for endpoint 'get_config_route'. Redirecting to login page.
+2025-06-26 17:39:46,604 - app - INFO - Initialized the database.
+2025-06-26 17:39:46,742 - app - INFO - Admin user 'testcliadmin' created.
+2025-06-26 17:39:47,148 - app - INFO - Admin user 'testadmin' password updated.
+2025-06-26 17:39:47,969 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:39:48,119 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:39:48,367 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:39:48,517 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:39:48,669 - app - INFO - User not authenticated for endpoint 'create_user'. Redirecting to login page.
+2025-06-26 17:39:48,820 - app - INFO - User not authenticated for endpoint 'create_user'. Redirecting to login page.
+2025-06-26 17:39:48,975 - app - INFO - User not authenticated for endpoint 'create_user'. Redirecting to login page.
+2025-06-26 17:39:49,002 - app - WARNING - User 'user5' has invalid byte count, treating as 0.
+2025-06-26 17:39:49,011 - app - WARNING - User 'user1' has invalid byte count, treating as 0.
+2025-06-26 17:39:49,015 - app - INFO - Deleted expired user 'expired_time_user'
+2025-06-26 17:39:49,025 - app - INFO - Deleted expired user 'expired_data_user'
+2025-06-26 17:39:49,034 - app - ERROR - Error creating user: user already exists
+2025-06-26 17:41:14,237 - app - INFO - File logging configured to: mikrotik_dashboard.log with level: INFO
+2025-06-26 17:41:14,237 - app - INFO - Audit logging configured to: audit.log
+2025-06-26 17:41:14,747 - app - INFO - User not authenticated for endpoint 'index'. Redirecting to login page.
+2025-06-26 17:41:15,034 - app - INFO - User 'testadmin_login' logged in successfully to the web application.
+2025-06-26 17:41:15,040 - app - INFO - Attempting to connect to Mikrotik: 192.168.1.62:8728 (SSL: False)
+2025-06-26 17:41:25,051 - app - ERROR - Mikrotik connection failed in get_mikrotik_api: timed out
+2025-06-26 17:41:25,062 - app - WARNING - Failed login attempt for app user 'wronguser'.
+2025-06-26 17:41:25,207 - app - INFO - User not authenticated for endpoint 'get_config_route'. Redirecting to login page.
+2025-06-26 17:41:25,222 - app - INFO - Initialized the database.
+2025-06-26 17:41:25,439 - app - INFO - Admin user 'testcliadmin' created.
+2025-06-26 17:41:25,849 - app - INFO - Admin user 'testadmin' password updated.
+2025-06-26 17:41:26,678 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:41:26,830 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:41:26,981 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:41:27,133 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:41:27,284 - app - INFO - User not authenticated for endpoint 'create_user'. Redirecting to login page.
+2025-06-26 17:41:27,434 - app - INFO - User not authenticated for endpoint 'create_user'. Redirecting to login page.
+2025-06-26 17:41:27,585 - app - INFO - User not authenticated for endpoint 'create_user'. Redirecting to login page.
+2025-06-26 17:41:27,613 - app - WARNING - User 'user5' has invalid bytes-in value ('invalid'), treating as 0.
+2025-06-26 17:41:27,615 - app - WARNING - User 'user1' has invalid bytes-in value ('abc'), treating as 0.
+2025-06-26 17:41:27,615 - app - WARNING - User 'user1' has invalid bytes-out value ('def'), treating as 0.
+2025-06-26 17:41:27,618 - app - INFO - Deleted expired user 'expired_time_user'
+2025-06-26 17:41:27,623 - app - INFO - Deleted expired user 'expired_data_user'
+2025-06-26 17:41:27,633 - app - ERROR - Error creating user: user already exists
+2025-06-26 17:42:30,948 - app - INFO - File logging configured to: mikrotik_dashboard.log with level: INFO
+2025-06-26 17:42:30,949 - app - INFO - Audit logging configured to: audit.log
+2025-06-26 17:42:31,124 - app - INFO - User not authenticated for endpoint 'index'. Redirecting to login page.
+2025-06-26 17:42:31,126 - app - INFO - User not authenticated for endpoint 'index'. Redirecting to login page.
+2025-06-26 17:42:31,407 - app - INFO - User 'testadmin_login' logged in successfully to the web application.
+2025-06-26 17:42:31,413 - app - INFO - Attempting to connect to Mikrotik: 192.168.1.62:8728 (SSL: False)
+2025-06-26 17:42:41,425 - app - ERROR - Mikrotik connection failed in get_mikrotik_api: timed out
+2025-06-26 17:42:41,435 - app - WARNING - Failed login attempt for app user 'wronguser'.
+2025-06-26 17:42:41,583 - app - INFO - User not authenticated for endpoint 'get_config_route'. Redirecting to login page.
+2025-06-26 17:42:41,670 - app - INFO - Initialized the database.
+2025-06-26 17:42:41,809 - app - INFO - Admin user 'testcliadmin' created.
+2025-06-26 17:42:42,224 - app - INFO - Admin user 'testadmin' password updated.
+2025-06-26 17:42:42,908 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:42:43,062 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:42:43,216 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:42:43,389 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:42:43,540 - app - INFO - User not authenticated for endpoint 'initial_connect'. Redirecting to login page.
+2025-06-26 17:42:43,694 - app - INFO - User not authenticated for endpoint 'create_user'. Redirecting to login page.
+2025-06-26 17:42:43,848 - app - INFO - User not authenticated for endpoint 'create_user'. Redirecting to login page.
+2025-06-26 17:42:44,004 - app - INFO - User not authenticated for endpoint 'create_user'. Redirecting to login page.
+2025-06-26 17:42:44,032 - app - WARNING - User 'user5' has invalid bytes-in value ('invalid'), treating as 0.
+2025-06-26 17:42:44,034 - app - WARNING - User 'user1' has invalid bytes-in value ('abc'), treating as 0.
+2025-06-26 17:42:44,034 - app - WARNING - User 'user1' has invalid bytes-out value ('def'), treating as 0.
+2025-06-26 17:42:44,037 - app - INFO - Deleted expired user 'expired_time_user'
+2025-06-26 17:42:44,040 - app - INFO - Deleted expired user 'expired_data_user'
+2025-06-26 17:42:44,050 - app - ERROR - Error creating user: user already exists

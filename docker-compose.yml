@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "5000:5000" # Map host port 5000 to container port 5000
+    volumes:
+      # Mount config.json for easier configuration management
+      # The application will create a default one if this is not present on the host
+      - ./config.json:/app/config.json
+      # Mount a directory for persistent data (SQLite DB, logs)
+      - ./app_data:/app/data
+      # Optional: Mount the audit log directly if preferred outside /app/data
+      - ./audit.log:/app/audit.log
+      # Optional: Mount the main log file directly
+      - ./mikrotik_dashboard.log:/app/mikrotik_dashboard.log
+    environment:
+      # Flask specific
+      - FLASK_APP=app.py
+      # - FLASK_ENV=development # Uncomment for development, defaults to production if not set and not debug
+      # - FLASK_DEBUG=1 # Uncomment for Flask debug mode (not recommended for Gunicorn production)
+
+      # Application specific
+      - FLASK_SECRET_KEY=your_very_strong_and_unique_secret_key_here # IMPORTANT: Change this in production!
+      - DATABASE_URL=sqlite:////app/data/mikrotik_dashboard_users.db # Path inside the container
+
+      # Gunicorn specific (can also be set in gunicorn_config.py)
+      # - GUNICORN_CMD_ARGS="--workers 3 --log-level debug"
+
+    # Healthcheck (optional, basic example)
+    # healthcheck:
+    #   test: ["CMD-SHELL", "curl -f http://localhost:5000/ || exit 1"] # Basic check for login page
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 30s # Give time for app to start
+
+    restart: unless-stopped # Or 'always'
+
+# Note on `config.json` and logs with Docker:
+# 1. If `config.json` is mounted from the host, changes on the host will reflect in the container.
+#    If it's not mounted and doesn't exist at /app/config.json, the app will create a default one inside the container's /app/ directory.
+# 2. For logs and the SQLite DB (`mikrotik_dashboard_users.db`):
+#    - The `DATABASE_URL` is set to `/app/data/mikrotik_dashboard_users.db`.
+#    - The volume `app_data:/app/data` makes this directory persistent on the host (Docker manages the `app_data` volume).
+#    - If you want logs (`audit.log`, `mikrotik_dashboard.log`) also in this persistent `app_data` directory,
+#      ensure their paths in `config.json` (or defaults in `app.py`) are relative to `/app/data/`, e.g., `data/audit.log`.
+#      Alternatively, mount them individually as shown but ensure paths match.
+#      The current `app.py` defaults `log_file` to `mikrotik_dashboard.log` and `audit_log_file` to `audit.log` in the WORKDIR (/app).
+#      So, the direct mounts for logs are suitable if you want them in the project root on the host.
+#      If you prefer them inside the `app_data` volume, adjust paths in `config.json` to be like `data/mikrotik_dashboard.log`.
+#
+# To run:
+# 1. (Optional) Create `config.json` in your project root if you want to pre-configure.
+# 2. Build and run: `docker-compose up --build`
+# 3. Initialize DB and create admin (first time):
+#    `docker-compose exec web flask init-db`
+#    `docker-compose exec web flask create-admin`
+#
+# For production:
+# - Ensure FLASK_SECRET_KEY is set to a strong unique value.
+# - Consider `FLASK_ENV=production`.
+# - Review Gunicorn worker count and other settings.
+# - Manage `config.json` securely (e.g., don't commit sensitive data if using host mount for convenience in dev).
+#   For production, environment variables or a proper secrets management system are better for sensitive parts of config.
+#
+# The current Dockerfile sets `DATABASE_URL` to `/app/data/mikrotik_dashboard_users.db`.
+# The `config.json` in the app defaults log files to be in `/app/`.
+# If `config.json` is mounted, its `log_file` and `audit_log_file` paths will be used.
+# To ensure logs also go to the persistent `/app/data` volume through `config.json`, you would set:
+# "log_file": "data/mikrotik_dashboard.log",
+# "audit_log_file": "data/audit.log"
+# in your host's `config.json` file before mounting.
+# The provided direct mounts for log files will place them in the project root on the host.
+# Choose the strategy that best fits your deployment needs.
+# For simplicity with the current app defaults, the direct log mounts are fine if logs in project root are acceptable.
+
+volumes:
+  app_data: # Docker will create this named volume for persistent data
+    driver: local

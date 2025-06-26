@@ -7,6 +7,10 @@ from flask_login import LoginManager, UserMixin, login_user, logout_user, login_
 from flask_wtf.csrf import CSRFProtect, generate_csrf # Import CSRFProtect and generate_csrf
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import timedelta
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_sqlalchemy import SQLAlchemy
+import click # For CLI commands
 import librouteros
 from librouteros.exceptions import TrapError
 import socket
@@ -28,6 +32,7 @@ import base64
 
 # --- Logging Configuration ---
 logger = logging.getLogger(__name__) # Get logger for the app
+audit_logger = logging.getLogger('audit') # New logger for audit trails
 # Note: Actual handler configuration will be done after app_config is loaded.
 
 # --- Graceful Dependency Handling ---
@@ -72,6 +77,11 @@ if app.config['SECRET_KEY'] == SECRET_KEY_FALLBACK:
     logger.warning("WARNING: FLASK_SECRET_KEY environment variable not set. Using a default, insecure key for development. SET THIS VARIABLE IN PRODUCTION!")
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=30) # Example: 30 minutes timeout
 
+# Database Configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///./mikrotik_dashboard_users.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
 # Initialize Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -82,6 +92,15 @@ login_manager.session_protection = "strong"
 csrf = CSRFProtect()
 csrf.init_app(app)
 app.config["WTF_CSRF_HEADER_NAME"] = "X-CSRFToken" # Tell Flask-WTF to look for token in this header for AJAX
+
+# Initialize Flask-Limiter
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://",  # For simple, single-process deployments. Consider Redis/Memcached for multi-process.
+    # strategy="fixed-window" # or "moving-window"
+)
 
 # Language configuration
 app.config['LANGUAGES'] = ['en', 'ar', 'fr']
@@ -125,33 +144,28 @@ class ConfigLoader:
                 "host": "0.0.0.0",
                 "port": 5000,
                 "debug": False,
-                "log_file": "mikrotik_dashboard.log", 
+                "log_file": "mikrotik_dashboard.log",
+                "audit_log_file": "audit.log",
                 "log_level_console": "INFO", 
                 "log_level_file": "INFO"     
-            },
-            "app_admin": {
-                "username": "admin",
-                "password_hash": "pbkdf2:sha256:600000$zR0gQY0gV0gY0gV0$c2df639e9e31b0cf9352d789a8f074d2f6a603cf8bd77a9a20addf32089e11f9" # Default for "changeme"
             }
+            # app_admin section is now removed as admin users are in the database
         }
 
         if os.path.exists(self.config_file):
             with open(self.config_file, 'r') as f:
                 loaded_config = json.load(f)
                 # Deep merge with default to ensure new keys are present
-                # For mikrotik and server, update the default_config's sections with loaded values
                 default_config['mikrotik'].update(loaded_config.get('mikrotik', {}))
                 default_config['server'].update(loaded_config.get('server', {}))
                 
-                # For app_admin, ensure it exists in default_config then update it
-                # This handles cases where app_admin might not be in an old config file
-                if 'app_admin' not in default_config: # Should not happen given the new default_config structure
-                    default_config['app_admin'] = {}
-                default_config['app_admin'].update(loaded_config.get('app_admin', {}))
+                # app_admin is no longer loaded from or saved to config.json
+                if 'app_admin' in loaded_config:
+                    logger.info("Found 'app_admin' in config.json. This section is deprecated and no longer used. Admin users are managed in the database.")
                 
                 return default_config
         else:
-            # If config file doesn't exist, write the full default_config (including new app_admin)
+            # If config file doesn't exist, write the default_config (without app_admin)
             with open(self.config_file, 'w') as f:
                 json.dump(default_config, f, indent=4)
             return default_config
@@ -237,31 +251,53 @@ def setup_logging(app_config_instance):
         fh.setFormatter(formatter)
         _logger.addHandler(fh)
         _logger.info(f"File logging configured to: {log_file_path} with level: {file_log_level_str}")
+
+        # Configure Audit Logger to a separate file
+        audit_log_file_path = app_config_instance.get('server', {}).get('audit_log_file', 'audit.log')
+        audit_log_dir = os.path.dirname(audit_log_file_path)
+        if audit_log_dir and not os.path.exists(audit_log_dir):
+            os.makedirs(audit_log_dir, exist_ok=True)
+
+        afh = logging.FileHandler(audit_log_file_path)
+        # Audit log level should generally be INFO to capture all audit events
+        afh.setLevel(logging.INFO)
+        afh.setFormatter(formatter) # Can use the same formatter or a specific one for audit
+
+        _audit_logger_instance = logging.getLogger('audit')
+        if _audit_logger_instance.hasHandlers(): # Clear existing handlers for audit logger as well
+            _audit_logger_instance.handlers.clear()
+        _audit_logger_instance.addHandler(afh)
+        _audit_logger_instance.propagate = False # Prevent audit logs from going to the main logger's handlers
+        _logger.info(f"Audit logging configured to: {audit_log_file_path}")
+
     except Exception as e:
-        _logger.error(f"Failed to configure file logging: {e}", exc_info=True)
+        _logger.error(f"Failed to configure file or audit logging: {e}", exc_info=True)
 
 setup_logging(app_config) # Call the setup function with the loaded app_config
 
 
 # --- User Class for Flask-Login ---
-class User(UserMixin):
-    def __init__(self, id):
-        self.id = id
+class DashboardAdmin(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password_hash = db.Column(db.String(256), nullable=False) # Increased length for potentially longer hashes
 
-    @staticmethod
-    def get(user_id):
-        admin_username = app_config.get('app_admin', {}).get('username')
-        if user_id == admin_username:
-            return User(user_id)
-        return None
+    def __repr__(self):
+        return f'<DashboardAdmin {self.username}>'
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
 
 @login_manager.user_loader
 def load_user(user_id):
-    user = User.get(user_id)
-    return user
+    # user_id is the primary key for DashboardAdmin model
+    return DashboardAdmin.query.get(int(user_id))
 
 # Define exempt endpoints that do not require a Mikrotik connection OR app login initially
-MIKROTIK_EXEMPT_ENDPOINTS = {'login_page', 'app_login_route', 'initial_connect', 'static', 'get_translations'}
+MIKROTIK_EXEMPT_ENDPOINTS = {'login_page', 'app_login_route', 'initial_connect', 'static', 'get_translations', 'cli'}
 # CSRF protection will be enabled by default for all POST/PUT/DELETE requests.
 # We might need to exempt specific routes if they are called from external systems not using our CSRF flow.
 # For now, all internal POSTs should be protected. login_page and app_login are POST but are handled.
@@ -626,9 +662,13 @@ def get_mikrotik_api():
 def teardown_connection(exception):
     """Closes the Mikrotik connection after each request."""
     mikrotik_connection = g.pop('mikrotik_connection', None)
+    g.pop('mikrotik_api', None) # Also remove the API object reference from g
     if mikrotik_connection:
-        mikrotik_connection.close()
-        logger.info("Mikrotik connection closed.")
+        try:
+            mikrotik_connection.close()
+            logger.info("Mikrotik connection closed.")
+        except Exception as e:
+            logger.error(f"Error closing Mikrotik connection during teardown: {e}")
 
 
 class RouterOSService:
@@ -885,13 +925,19 @@ class RouterOSService:
         data_by_profile = {}
 
         for user in users:
+            bytes_in_str = user.get('bytes-in', '0') # Default to '0' string
+            bytes_out_str = user.get('bytes-out', '0') # Default to '0' string
+
             try:
-                # Ensure bytes are treated as numbers, default to 0 if not present or not convertible
-                bytes_in = int(user.get('bytes-in', 0) or 0)
-                bytes_out = int(user.get('bytes-out', 0) or 0)
-            except ValueError: # Handle case where byte counts are not valid integers
-                logger.warning(f"User '{user.get('name', 'Unknown')}' has invalid byte count, treating as 0.")
+                bytes_in = int(bytes_in_str or '0') # Ensure 'or 0' if empty string from get, then int
+            except ValueError:
+                logger.warning(f"User '{user.get('name', 'Unknown')}' has invalid bytes-in value ('{bytes_in_str}'), treating as 0.")
                 bytes_in = 0
+
+            try:
+                bytes_out = int(bytes_out_str or '0')
+            except ValueError:
+                logger.warning(f"User '{user.get('name', 'Unknown')}' has invalid bytes-out value ('{bytes_out_str}'), treating as 0.")
                 bytes_out = 0
                 
             user_total_data = bytes_in + bytes_out
@@ -1020,6 +1066,60 @@ def generate_qr_code_base64(login_url, username, password):
     img.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
+# --- Input Validation Helpers ---
+def validate_string(value, field_name, min_len=None, max_len=None, pattern=None, allowed_chars_desc=None):
+    """General purpose string validator."""
+    if not isinstance(value, str):
+        return f"{field_name} must be a string."
+    if min_len is not None and len(value) < min_len:
+        return f"{field_name} must be at least {min_len} characters long."
+    if max_len is not None and len(value) > max_len:
+        return f"{field_name} must be at most {max_len} characters long."
+    if pattern:
+        if not re.match(pattern, value):
+            desc = f" It must match the pattern: {pattern}."
+            if allowed_chars_desc:
+                desc = f" Allowed characters: {allowed_chars_desc}."
+            return f"{field_name} has an invalid format.{desc}"
+    return None
+
+def validate_integer(value, field_name, min_val=None, max_val=None):
+    """General purpose integer validator."""
+    if not isinstance(value, int):
+        try:
+            value = int(value) # Try to convert if it's a string representation
+        except (ValueError, TypeError):
+            return f"{field_name} must be an integer."
+    if min_val is not None and value < min_val:
+        return f"{field_name} must be at least {min_val}."
+    if max_val is not None and value > max_val:
+        return f"{field_name} must be at most {max_val}."
+    return None
+
+def validate_ros_time_format(value, field_name):
+    """Validates RouterOS time format (e.g., 1w2d3h4m5s or 30m or 1h)."""
+    if not value: # Empty string is often valid for 'unlimited' or 'none'
+        return None
+    if not isinstance(value, str):
+        return f"{field_name} must be a string for time format."
+    if not re.fullmatch(r"^((\d+[wdhms])+)$|^$", value): # Allow empty string or valid ROS time
+        return f"{field_name} ('{value}') is not a valid RouterOS time format (e.g., 30m, 1h30m, 2d)."
+    return None
+
+def validate_ros_rate_limit_format(value, field_name):
+    """Validates RouterOS rate limit format (e.g., 512k/2M or 10M)."""
+    if not value: # Empty string is often valid for 'unlimited' or 'none'
+        return None
+    if not isinstance(value, str):
+        return f"{field_name} must be a string for rate limit format."
+    # Regex for format: optional_rx / optional_tx, where each can be number + k/M/G suffix
+    # This regex is simplified and might need to be more robust for all edge cases.
+    # Example: 10M, 512k/1M, /2M (tx only), 1M/ (rx only)
+    pattern = r"^((\d+[kmgKMG]?)?(/(\d+[kmgKMG]?)?)?)$"
+    if not re.fullmatch(pattern, value) or value == '/': # value == '/' is not valid
+        return f"{field_name} ('{value}') is not a valid RouterOS rate limit format (e.g., 512k/2M, 10M)."
+    return None
+
 # --- Flask Routes ---
 @app.route('/')
 def login_page():
@@ -1044,6 +1144,7 @@ def login_page():
 
 
 @app.route('/app-login', methods=['POST'])
+@limiter.limit("5 per minute") # Apply specific rate limit to this route
 # This route is already protected by default by Flask-WTF's CSRF protection for POST requests.
 # No need to add @csrf.exempt if we intend to protect it.
 def app_login_route():
@@ -1052,25 +1153,20 @@ def app_login_route():
     username = data.get('app_username')
     password = data.get('app_password')
 
-    admin_config = app_config.get('app_admin', {})
-    admin_username = admin_config.get('username')
-    admin_password_hashed = admin_config.get('password_hash')
+    if not username or not password:
+        audit_logger.warning(f"EVENT: AppLoginFailure; USER: {username or '[empty]'}; IP: {request.remote_addr}; REASON: Missing username or password")
+        return jsonify({'success': False, 'message': _('Username and password are required.')}), 400
 
-    if not admin_username or not admin_password_hashed:
-        logger.error("App admin username or password hash not configured in config.json.")
-        return jsonify({'success': False, 'message': _('App login not configured on server.')}), 500
+    admin_user = DashboardAdmin.query.filter_by(username=username).first()
 
-    if username == admin_username and check_password_hash(admin_password_hashed, password):
-        user = User.get(username)
-        if user:
-            login_user(user, remember=True, duration=app.config['PERMANENT_SESSION_LIFETIME'])
-            logger.info(f"User '{username}' logged in successfully to the web application.")
-            return jsonify({'success': True, 'message': _('Web app login successful.')})
-        else: # Should not happen if User.get is consistent
-            logger.error(f"User.get failed for '{username}' after successful credential check.")
-            return jsonify({'success': False, 'message': _('Login failed. User object could not be created.')}), 500
+    if admin_user and admin_user.check_password(password):
+        login_user(admin_user, remember=True, duration=app.config['PERMANENT_SESSION_LIFETIME'])
+        logger.info(f"User '{username}' logged in successfully to the web application.")
+        audit_logger.info(f"EVENT: AppLoginSuccess; USER: {username}; IP: {request.remote_addr}")
+        return jsonify({'success': True, 'message': _('Web app login successful.')})
     else:
         logger.warning(f"Failed login attempt for app user '{username}'.")
+        audit_logger.warning(f"EVENT: AppLoginFailure; USER: {username}; IP: {request.remote_addr}; REASON: Invalid credentials")
         return jsonify({'success': False, 'message': _('Invalid web app username or password.')}), 401
 
 
@@ -1088,23 +1184,44 @@ def initial_connect():
     global app_config # Ensure we're updating the global app_config
     data = request.json
     host = data.get('host')
-    port = data.get('port')
+    port_str = data.get('port') # Port comes as string from JSON if not converted by client
     username = data.get('username')
     password = data.get('password') # Password can be empty
+    errors = []
 
-    if not all([host, port is not None, username is not None]): # port can be 0, username can be empty string
-        return jsonify({'success': False, 'message': 'Host, Port, and Username are required.'}), 400
+    # Validate host
+    if not host:
+        errors.append(_('Host is required.'))
+    else:
+        err = validate_string(host, _('Router IP Address'), pattern=r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}|([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,6}$")
+        if err: errors.append(err)
 
-    try:
-        port = int(port)
-        if not (0 <= port <= 65535): # Port 0 is technically valid for OS to pick one
-            raise ValueError("Invalid port number")
-    except ValueError:
-        return jsonify({'success': False, 'message': 'Invalid port number. Must be between 0 and 65535.'}), 400
+    # Validate port
+    if port_str is None: # Check if port is provided at all
+         errors.append(_('Port is required.'))
+    else:
+        err = validate_integer(port_str, _('API Port'), min_val=1, max_val=65535)
+        if err: errors.append(err)
+        else: port = int(port_str) # Convert to int after validation
+
+    # Validate username
+    if username is None: # Username can technically be empty string for some setups, but None is not okay.
+         errors.append(_('Username is required.'))
+    else: # If not None, validate as string. Empty string is allowed by max_len=0 if min_len is not set or 0.
+        err = validate_string(username, _('Router Username'), max_len=63) # Allow empty by not setting min_len
+        if err: errors.append(err)
+
+    # Password can be empty, so just ensure it's a string if provided
+    if password is not None:
+        err = validate_string(password, _('Router Password'), max_len=128)
+        if err: errors.append(err)
+
+    if errors:
+        return jsonify({'success': False, 'message': " ".join(errors)}), 400
 
     logger.info(f"Attempting initial connection to Mikrotik: {host}:{port} with user: {username}")
     try:
-        # Attempt connection
+        # Attempt connection. Port is now guaranteed to be an int.
         temp_conn = librouteros.connect(
             host=host,
             username=username,
@@ -1127,10 +1244,14 @@ def initial_connect():
         config_loader.update_config({'mikrotik': new_mikrotik_config})
         app_config = config_loader.get_config() # Reload app_config to reflect changes
 
+        loggable_new_config = new_mikrotik_config.copy()
+        if 'password' in loggable_new_config: loggable_new_config['password'] = "[REDACTED]"
+        audit_logger.info(f"EVENT: InitialMikrotikConfigSuccess; ADMIN: {current_user.id}; NEW_CONFIG: {loggable_new_config}")
         return jsonify({'success': True, 'message': 'Successfully connected and configuration saved.'})
 
     except (librouteros.exceptions.LibRouterosError, TrapError, socket.error, ConnectionRefusedError, OSError) as e:
         logger.error(f"Initial connection failed: {e}")
+        audit_logger.error(f"EVENT: InitialMikrotikConfigFailure; ADMIN: {current_user.id}; HOST: {host}; PORT: {port}; USER: {username}; REASON: {e}")
         # Sanitize error message for user
         error_message = str(e)
         if "authentication failed" in error_message.lower():
@@ -1140,6 +1261,7 @@ def initial_connect():
         return jsonify({'success': False, 'message': f'Connection failed: {e}.'}), 400
     except Exception as e:
         logger.error(f"Unexpected error during initial connection: {e}")
+        audit_logger.error(f"EVENT: InitialMikrotikConfigFailure; ADMIN: {current_user.id}; HOST: {host}; PORT: {port}; USER: {username}; REASON: Unexpected error - {e}")
         return jsonify({'success': False, 'message': f'An unexpected error occurred: {e}.'}), 500
 
 
@@ -1158,10 +1280,14 @@ def get_config_route():
         'pdf_export': WEASYPRINT_AVAILABLE,
         'qr_codes': QRCODE_AVAILABLE
     }
-    # Add app_admin section but without password for security
-    app_admin_secure = cfg.get('app_admin', {}).copy()
-    app_admin_secure.pop('password_hash', None) # Remove password hash
-    cfg['app_admin_display'] = app_admin_secure
+    # app_admin section is no longer in config.json
+    # If display of current admin username is needed, it should be fetched differently (e.g., from current_user)
+    # For now, removing app_admin_display from the config output.
+    if 'app_admin_display' in cfg: # Clean up if it's somehow still there from old configs
+        del cfg['app_admin_display']
+    if 'app_admin' in cfg: # Clean up if it's somehow still there from old configs
+        del cfg['app_admin']
+
 
     return jsonify(cfg)
 
@@ -1169,19 +1295,75 @@ def get_config_route():
 @login_required
 def update_config_route():
     data = request.json
+    errors = []
+
+    # Validate mikrotik settings if present
+    if 'mikrotik' in data:
+        m_config = data['mikrotik']
+        if 'host' in m_config:
+            # Allow IP or hostname. Regex for basic hostname/IP. More complex validation possible.
+            err = validate_string(m_config['host'], _('Router IP Address'), pattern=r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}|([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,6}$")
+            if err: errors.append(err)
+        if 'port' in m_config:
+            err = validate_integer(m_config['port'], _('API Port'), min_val=1, max_val=65535)
+            if err: errors.append(err)
+        if 'username' in m_config: # Username can be empty for some Mikrotik setups
+            err = validate_string(m_config['username'], _('Router Username'), max_len=63)
+            if err: errors.append(err)
+        if 'password' in m_config: # Password can be empty
+            err = validate_string(m_config['password'], _('Router Password'), max_len=128) # Generous max len
+            if err: errors.append(err)
+        if 'hotspot_login_url' in m_config and m_config['hotspot_login_url']:
+            # Basic URL validation, not exhaustive
+            err = validate_string(m_config['hotspot_login_url'], _('Hotspot Login URL'), pattern=r"^https?://.+")
+            if err: errors.append(err)
+        if 'use_ssl' in m_config and not isinstance(m_config['use_ssl'], bool):
+            errors.append(_('Use SSL must be a boolean (true/false).'))
+
+
+    # Validate server settings if present
+    if 'server' in data:
+        s_config = data['server']
+        if 'host' in s_config:
+            # Allow IP or '0.0.0.0'.
+            err = validate_string(s_config['host'], _('Server Host'), pattern=r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+            if err: errors.append(err)
+        if 'port' in s_config:
+            err = validate_integer(s_config['port'], _('Server Port'), min_val=1, max_val=65535)
+            if err: errors.append(err)
+        if 'log_file' in s_config: # Basic check, not full path validation
+            err = validate_string(s_config['log_file'], _('Log File Path'), min_len=1, max_len=255)
+            if err: errors.append(err)
+        if 'log_level_console' in s_config:
+            allowed_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+            if s_config['log_level_console'].upper() not in allowed_levels:
+                errors.append(_('Invalid console log level. Allowed: {0}').format(", ".join(allowed_levels)))
+            else: s_config['log_level_console'] = s_config['log_level_console'].upper()
+        if 'log_level_file' in s_config:
+            allowed_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+            if s_config['log_level_file'].upper() not in allowed_levels:
+                errors.append(_('Invalid file log level. Allowed: {0}').format(", ".join(allowed_levels)))
+            else: s_config['log_level_file'] = s_config['log_level_file'].upper()
+        if 'debug' in s_config and not isinstance(s_config['debug'], bool):
+            errors.append(_('Debug mode must be a boolean (true/false).'))
+
+
     # Prevent app_admin password_hash from being updated directly via this generic route
-    # It should be handled by a dedicated password change route (not in scope for this subtask)
     if 'app_admin' in data:
-        # If 'app_admin' is present, make sure it doesn't try to wipe/change password_hash
-        # Best is to pop it and instruct user to use a dedicated mechanism if they want to change app user details
-        data.pop('app_admin', None)
-        # Or, more carefully, preserve existing password if username is updated
-        # current_admin_config = config_loader.get_config().get('app_admin', {})
-        # if 'username' in data.get('app_admin', {}): # if new username is provided
-        #    data['app_admin']['password_hash'] = current_admin_config.get('password_hash')
+        data.pop('app_admin', None) # Silently remove it, or add to errors if strict.
+        # errors.append(_('App admin configuration cannot be changed via this general settings route.'))
 
 
-    config_loader.update_config(data)
+    if errors:
+        return jsonify({'success': False, 'message': " ".join(errors)}), 400
+
+    config_loader.update_config(data) # data is now validated or parts of it are
+    # Create a copy of data for logging, redacting sensitive fields like passwords
+    loggable_data = data.copy()
+    if 'mikrotik' in loggable_data and 'password' in loggable_data['mikrotik']:
+        loggable_data['mikrotik']['password'] = "[REDACTED]"
+
+    audit_logger.info(f"EVENT: SettingsUpdateSuccess; ADMIN: {current_user.id}; UPDATED_CONFIG_SECTIONS: {list(loggable_data.keys())}; PAYLOAD: {loggable_data}")
     return jsonify({'success': True, 'message': 'Configuration updated and saved.'})
 
 @app.route('/api/dashboard-stats', methods=['GET'])
@@ -1203,34 +1385,124 @@ def get_users():
 @login_required
 def create_user():
     data = request.json
-    username = data.get('name')
+    errors = []
+
+    # Validate name
+    name = data.get('name')
+    if not name:
+        errors.append(_('Username is required.'))
+    else:
+        err = validate_string(name, _('Username'), min_len=1, max_len=63, pattern=r"^[a-zA-Z0-9_@.-]+$",
+                              allowed_chars_desc=_("letters, numbers, and _@.-"))
+        if err: errors.append(err)
+
+    # Validate password
     password = data.get('password')
-    if not username or not password:
-        return jsonify({'success': False, 'message': _('Username and password are required.')}), 400
+    if not password:
+        errors.append(_('Password is required.'))
+    else:
+        err = validate_string(password, _('Password'), min_len=3, max_len=63)
+        if err: errors.append(err)
+
+    # Validate profile
+    profile = data.get('profile')
+    if not profile: # Profile is usually required by Mikrotik
+        errors.append(_('Profile is required.'))
+    else:
+        err = validate_string(profile, _('Profile'), min_len=1, max_len=63) # Assuming profile names have similar constraints
+        if err: errors.append(err)
+
+    # Validate limit-uptime (optional)
+    limit_uptime = data.get('limit-uptime')
+    if limit_uptime is not None and limit_uptime != "": # Allow empty string for no limit
+        err = validate_ros_time_format(limit_uptime, _('Time Limit'))
+        if err: errors.append(err)
     
-    success, message = router_os_service.create_hotspot_user(data)
-    return jsonify({'success': success, 'message': message}) # Assuming router_os_service returns translated messages or they are generic
+    # Validate limit-bytes-total (optional, comes as number of MB from UI, convert to bytes)
+    # The key in 'data' might be 'limit-bytes-total' directly if UI sends it, or 'dataLimit' (MB)
+    # Current JS code sends 'limit-bytes-total' after converting MB to bytes if 'dataLimit' is set.
+    # So, we expect 'limit-bytes-total' as a number (bytes) or null/empty.
+    limit_bytes_total = data.get('limit-bytes-total') # This is expected to be in bytes or null
+    if limit_bytes_total is not None: # Can be 0
+        err = validate_integer(limit_bytes_total, _('Data Limit (bytes)'), min_val=0)
+        if err: errors.append(err)
+
+    # Validate comment (optional)
+    comment = data.get('comment')
+    if comment is not None and comment != "":
+        err = validate_string(comment, _('Comment'), max_len=255)
+        if err: errors.append(err)
+
+    if errors:
+        return jsonify({'success': False, 'message': " ".join(errors)}), 400
+
+    # Prepare data for service, ensuring correct types for optional fields
+    user_payload = {
+        'name': name,
+        'password': password,
+        'profile': profile,
+        # Only include these if they have valid, non-empty values
+        'limit-uptime': limit_uptime if limit_uptime else None,
+        'limit-bytes-total': int(limit_bytes_total) if limit_bytes_total is not None else None,
+        'comment': comment if comment else None,
+        'server': data.get('server') # Pass server if provided, usually for specific hotspot server
+    }
+    # Filter out None values before sending to service, as service already does this, but good practice.
+    user_payload_cleaned = {k: v for k, v in user_payload.items() if v is not None}
+
+    success, message = router_os_service.create_hotspot_user(user_payload_cleaned)
+    if success:
+        audit_logger.info(f"EVENT: UserCreateSuccess; ADMIN: {current_user.id}; TARGET_USER: {name}; PAYLOAD: {user_payload_cleaned}")
+    else:
+        audit_logger.error(f"EVENT: UserCreateFailure; ADMIN: {current_user.id}; TARGET_USER: {name}; PAYLOAD: {user_payload_cleaned}; REASON: {message}")
+    return jsonify({'success': success, 'message': message})
 
 @app.route('/api/bulk-create-users', methods=['POST'])
 @login_required
 def bulk_create_users():
     data = request.json
+    errors = []
+
+    # Validate number_of_users
     number_of_users = data.get('number_of_users')
+    err = validate_integer(number_of_users, _('Number of Vouchers'), min_val=1, max_val=1000) # Max 1000 per batch
+    if err: errors.append(err)
+    else: number_of_users = int(number_of_users) # Ensure it's int
+
+    # Validate profile
     profile = data.get('profile')
-    username_length = int(data.get('username_length', 6))
-    password_length = int(data.get('password_length', 8))
+    if not profile:
+        errors.append(_('Profile is required.'))
+    else:
+        err = validate_string(profile, _('Profile'), min_len=1, max_len=63)
+        if err: errors.append(err)
 
+    # Validate username_length
+    username_length = data.get('username_length', 6) # Default from UI
+    err = validate_integer(username_length, _('Username Length'), min_val=1, max_val=63)
+    if err: errors.append(err)
+    else: username_length = int(username_length)
+
+    # Validate password_length
+    password_length = data.get('password_length', 6) # Default from UI
+    err = validate_integer(password_length, _('Password Length'), min_val=3, max_val=63)
+    if err: errors.append(err)
+    else: password_length = int(password_length)
+
+    # Validate username_prefix (optional)
     username_prefix = data.get('username_prefix', '')
-    username_charset_key = data.get('username_charset', 'alphanumeric')
-    password_charset_key = data.get('password_charset', 'alphanumeric_symbols')
-    comment_for_batch = data.get('comment_prefix', '')
+    if username_prefix: # Only validate if provided
+        err = validate_string(username_prefix, _('Username Prefix'), max_len=30, pattern=r"^[a-zA-Z0-9_.-]*$",
+                              allowed_chars_desc=_("letters, numbers, and _.-"))
+        if err: errors.append(err)
 
-    if not all([number_of_users, profile]):
-        return jsonify({'success': False, 'message': _('Number of users and profile are required.')}), 400
-    if int(number_of_users) <= 0:
-        return jsonify({'success': False, 'message': _('Number of users must be positive.')}), 400
+    # Validate comment_for_batch (optional, was 'comment_prefix' in UI)
+    comment_for_batch = data.get('comment_prefix', '') # UI sends 'comment_prefix'
+    if comment_for_batch:
+        err = validate_string(comment_for_batch, _('Batch Name / Comment Prefix'), max_len=255)
+        if err: errors.append(err)
 
-    # Define character sets
+    # Validate charsets
     safe_symbols = '!@#$%^&*-=+'
     charsets = {
         'alphanumeric': string.ascii_letters + string.digits,
@@ -1241,20 +1513,58 @@ def bulk_create_users():
         'alpha_lower': string.ascii_lowercase,
         'alphanumeric_symbols': string.ascii_letters + string.digits + safe_symbols
     }
-    username_chars = charsets.get(username_charset_key, charsets['alphanumeric'])
-    password_chars = charsets.get(password_charset_key, charsets['alphanumeric_symbols'])
+    username_charset_key = data.get('username_charset', 'alphanumeric')
+    password_charset_key = data.get('password_charset', 'alphanumeric_symbols')
 
-    base_user_data_keys = ['profile', 'limit-uptime', 'limit-bytes-total', 'server']
-    base_user_data = {k: data[k] for k in base_user_data_keys if k in data and data[k]}
+    if username_charset_key not in charsets:
+        errors.append(_('Invalid username character set selected.'))
+    if password_charset_key not in charsets:
+        errors.append(_('Invalid password character set selected.'))
+
+    # Validate limit-uptime (optional)
+    limit_uptime = data.get('limit-uptime')
+    if limit_uptime is not None and limit_uptime != "":
+        err = validate_ros_time_format(limit_uptime, _('Time Limit'))
+        if err: errors.append(err)
+
+    # Validate limit-bytes-total (optional)
+    # UI sends 'bulkDataLimit' in MB, which JS converts to 'limit-bytes-total' in bytes before sending.
+    # Or it might be sent directly as 'limit-bytes-total' if API is used directly.
+    # For now, assume 'limit-bytes-total' comes as integer bytes from client if provided.
+    limit_bytes_total_str = data.get('limit-bytes-total') # Could be string or int from JSON
+    limit_bytes_total = None
+    if limit_bytes_total_str is not None:
+        err = validate_integer(limit_bytes_total_str, _('Total Data Limit (bytes)'), min_val=0)
+        if err: errors.append(err)
+        else: limit_bytes_total = int(limit_bytes_total_str)
+
+
+    if errors: # Check accumulated errors before proceeding
+        return jsonify({'success': False, 'message': " ".join(errors)}), 400
+
+    username_chars = charsets.get(username_charset_key) # Already validated keys
+    password_chars = charsets.get(password_charset_key)
+
+    # Prepare base user data, including validated optional fields
+    base_user_data = {'profile': profile}
+    if limit_uptime:
+        base_user_data['limit-uptime'] = limit_uptime
+    if limit_bytes_total is not None: # Can be 0
+        base_user_data['limit-bytes-total'] = limit_bytes_total
+    if data.get('server'): # Optional server field
+        base_user_data['server'] = data['server']
+    if comment_for_batch: # This is the comment for each user in the batch
+        base_user_data['comment'] = comment_for_batch
 
 
     created_credentials = []
-    errors = []
+    creation_errors = [] # Use a different name to avoid conflict with validation errors list
     
-    for _ in range(int(number_of_users)):
-        random_username_part = ''.join(random.choices(username_chars, k=username_length))
-        username = username_prefix + random_username_part
-        password = ''.join(random.choices(password_chars, k=password_length))
+    # number_of_users has been validated as int already
+    for _ in range(number_of_users):
+        random_username_part = ''.join(random.choices(username_chars, k=username_length)) # username_length validated
+        username = username_prefix + random_username_part # username_prefix validated
+        password = ''.join(random.choices(password_chars, k=password_length)) # password_length validated
         
         user_data = base_user_data.copy()
         user_data['name'] = username
@@ -1268,29 +1578,110 @@ def bulk_create_users():
         if success:
             created_credentials.append({'username': username, 'password': password})
         else:
-            errors.append({'username': username, 'error': msg})
+            creation_errors.append({'username': username, 'error': msg})
 
     return jsonify({
-        'success': len(errors) == 0,
-        'message': _("Created {0} users. Failed: {1}.").format(len(created_credentials), len(errors)),
+        'success': len(creation_errors) == 0,
+        'message': _("Created {0} users. Failed: {1}.").format(len(created_credentials), len(creation_errors)),
         'created_credentials': created_credentials,
-        'errors': errors
+        'errors': creation_errors
     })
+    # Audit logging for bulk creation is tricky due to per-user success/failure.
+    # For now, log the overall attempt and outcome. Detailed per-user audit could be too verbose here.
+    # A summary log:
+    audit_event_type = "UserBulkCreatePartialSuccess" if len(creation_errors) > 0 and len(created_credentials) > 0 else \
+                       ("UserBulkCreateSuccess" if len(creation_errors) == 0 else "UserBulkCreateFailure")
+    audit_logger.info(
+        f"EVENT: {audit_event_type}; ADMIN: {current_user.id}; "
+        f"REQUEST_PARAMS: {{number: {number_of_users}, profile: {profile}, prefix: {username_prefix}, etc.}}; " # Avoid logging all params for brevity
+        f"SUCCESS_COUNT: {len(created_credentials)}; FAILURE_COUNT: {len(creation_errors)}"
+    )
+    # Note: Sensitive parameters like length/charset are not logged here for brevity, but could be.
 
 @app.route('/api/users/<username>', methods=['PUT'])
 @login_required
 def edit_user(username: str):
     data = request.json
-    if 'disabled' in data:
-        data['disabled'] = 'true' if data['disabled'] else 'false'
+    errors = []
 
-    success, message = router_os_service.edit_hotspot_user(username, data)
+    # Validate provided fields. All fields are optional in an edit.
+    # Username in path is used, not from payload.
+
+    if 'password' in data and data['password'] is not None and data['password'] != "":
+        err = validate_string(data['password'], _('Password'), min_len=3, max_len=63)
+        if err: errors.append(err)
+
+    if 'profile' in data and data['profile'] is not None:
+        err = validate_string(data['profile'], _('Profile'), min_len=1, max_len=63)
+        if err: errors.append(err)
+        if not data['profile']: # Profile cannot be empty string if provided for update
+            errors.append(_('Profile cannot be empty if you intend to change it. To remove, this might need specific handling or may not be allowed by Mikrotik.'))
+
+
+    if 'limit-uptime' in data and data['limit-uptime'] is not None and data['limit-uptime'] != "":
+        err = validate_ros_time_format(data['limit-uptime'], _('Time Limit'))
+        if err: errors.append(err)
+
+    if 'limit-bytes-total' in data and data['limit-bytes-total'] is not None: # Can be 0
+        err = validate_integer(data['limit-bytes-total'], _('Data Limit (bytes)'), min_val=0)
+        if err: errors.append(err)
+        # Ensure it's converted to int for the payload if it was a string
+        if not err and isinstance(data['limit-bytes-total'], str):
+            try:
+                data['limit-bytes-total'] = int(data['limit-bytes-total'])
+            except ValueError:
+                errors.append(_('Data Limit (bytes) must be a valid number.'))
+
+
+    if 'comment' in data and data['comment'] is not None and data['comment'] != "":
+        err = validate_string(data['comment'], _('Comment'), max_len=255)
+        if err: errors.append(err)
+
+    if 'disabled' in data and data['disabled'] is not None:
+        if not isinstance(data['disabled'], bool):
+            errors.append(_('Disabled status must be a boolean (true/false).'))
+
+    if errors:
+        return jsonify({'success': False, 'message': " ".join(errors)}), 400
+
+    # Prepare payload for the service
+    edit_payload = {}
+    if 'password' in data and data['password']: # Only include if non-empty
+        edit_payload['password'] = data['password']
+    if 'profile' in data and data['profile']: # Only include if non-empty
+        edit_payload['profile'] = data['profile']
+
+    # For optional fields that can be empty or zero (like limits, comment)
+    # Check if key exists in data to allow explicit reset/clearing if backend supports it
+    if 'limit-uptime' in data:
+        edit_payload['limit-uptime'] = data['limit-uptime'] if data['limit-uptime'] else None # Pass empty as None or value
+    if 'limit-bytes-total' in data: # Frontend sends MB, converted to bytes
+        edit_payload['limit-bytes-total'] = data['limit-bytes-total'] # Already validated as int or None
+
+    if 'comment' in data:
+        edit_payload['comment'] = data['comment'] if data['comment'] else None
+
+    if 'disabled' in data and data['disabled'] is not None:
+        edit_payload['disabled'] = 'true' if data['disabled'] else 'false'
+
+    if not edit_payload: # Nothing to update
+        return jsonify({'success': False, 'message': _('No update data provided.')}), 400
+
+    success, message = router_os_service.edit_hotspot_user(username, edit_payload)
+    if success:
+        audit_logger.info(f"EVENT: UserEditSuccess; ADMIN: {current_user.id}; TARGET_USER: {username}; PAYLOAD: {edit_payload}")
+    else:
+        audit_logger.error(f"EVENT: UserEditFailure; ADMIN: {current_user.id}; TARGET_USER: {username}; PAYLOAD: {edit_payload}; REASON: {message}")
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/users/<username>', methods=['DELETE'])
 @login_required
 def delete_user(username: str):
     success, message = router_os_service.delete_hotspot_user(username)
+    if success:
+        audit_logger.info(f"EVENT: UserDeleteSuccess; ADMIN: {current_user.id}; TARGET_USER: {username}")
+    else:
+        audit_logger.error(f"EVENT: UserDeleteFailure; ADMIN: {current_user.id}; TARGET_USER: {username}; REASON: {message}")
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/active-sessions', methods=['GET'])
@@ -1357,25 +1748,217 @@ def get_profiles_route():
 @login_required
 def create_profile_route():
     data = request.json
-    if not data.get('name'):
-        return jsonify({'success': False, 'message': _('Profile name is required.')}), 400
-    success, message = router_os_service.create_hotspot_profile(data)
+    errors = []
+
+    name = data.get('name')
+    if not name:
+        errors.append(_('Profile name is required.'))
+    else:
+        err = validate_string(name, _('Profile Name'), min_len=1, max_len=63) # Typical Mikrotik name length
+        if err: errors.append(err)
+
+    rate_limit = data.get('rate-limit')
+    if rate_limit is not None and rate_limit != "":
+        err = validate_ros_rate_limit_format(rate_limit, _('Rate Limit'))
+        if err: errors.append(err)
+
+    session_timeout = data.get('session-timeout')
+    if session_timeout is not None and session_timeout != "":
+        err = validate_ros_time_format(session_timeout, _('Session Timeout')) # RouterOS time format
+        if err: errors.append(err)
+
+    shared_users = data.get('shared-users') # Can be string or int from JSON
+    if shared_users is not None and shared_users != "": # Allow empty string for 'none' or 'unlimited' effectively
+        err = validate_integer(shared_users, _('Shared Users'), min_val=0) # 0 might mean unlimited or 1 depending on ROS version/setup
+        if err: errors.append(err)
+        else: data['shared-users'] = str(shared_users) # Ensure it's a string for Mikrotik if it was int
+
+    if errors:
+        return jsonify({'success': False, 'message': " ".join(errors)}), 400
+
+    # Prepare payload, filtering out None or empty strings that shouldn't be sent
+    profile_payload = {'name': name}
+    if rate_limit: profile_payload['rate-limit'] = rate_limit
+    if session_timeout: profile_payload['session-timeout'] = session_timeout
+    if shared_users is not None and shared_users != "": # Only add if it has a value
+        profile_payload['shared-users'] = data['shared-users']
+    # Add other profile fields if any (e.g., mac-cookie-timeout, keepalive-timeout) with similar validation
+
+    success, message = router_os_service.create_hotspot_profile(profile_payload)
+    if success:
+        audit_logger.info(f"EVENT: ProfileCreateSuccess; ADMIN: {current_user.id}; TARGET_PROFILE: {name}; PAYLOAD: {profile_payload}")
+    else:
+        audit_logger.error(f"EVENT: ProfileCreateFailure; ADMIN: {current_user.id}; TARGET_PROFILE: {name}; PAYLOAD: {profile_payload}; REASON: {message}")
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/profiles/<profile_id>', methods=['PUT'])
 @login_required
 def edit_profile_route(profile_id: str):
     data = request.json
-    if not data:
+    errors = []
+
+    if not data: # No data sent
         return jsonify({'success': False, 'message': _('No data provided for update.')}), 400
-    success, message = router_os_service.edit_hotspot_profile(profile_id, data)
+
+    # Profile ID is from URL, 'name' can be in payload if renaming is allowed (usually not by .id)
+    # For simplicity, we assume 'name' is not changed here. If it were, it needs validation.
+    # If 'name' is in data, it should match the existing name or be handled as a rename (more complex).
+    # Most Mikrotik 'set' operations don't change the 'name' property using the .id.
+
+    if 'rate-limit' in data and data['rate-limit'] is not None and data['rate-limit'] != "":
+        err = validate_ros_rate_limit_format(data['rate-limit'], _('Rate Limit'))
+        if err: errors.append(err)
+
+    if 'session-timeout' in data and data['session-timeout'] is not None and data['session-timeout'] != "":
+        err = validate_ros_time_format(data['session-timeout'], _('Session Timeout'))
+        if err: errors.append(err)
+
+    if 'shared-users' in data and data['shared-users'] is not None and data['shared-users'] != "":
+        err = validate_integer(data['shared-users'], _('Shared Users'), min_val=0)
+        if err: errors.append(err)
+        else: data['shared-users'] = str(data['shared-users']) # Ensure string for Mikrotik
+
+    if errors:
+        return jsonify({'success': False, 'message': " ".join(errors)}), 400
+
+    # Prepare payload for service, only including fields that were actually in the request data
+    edit_payload = {}
+    if 'rate-limit' in data: # Allow sending empty string to clear the value on Mikrotik
+        edit_payload['rate-limit'] = data['rate-limit'] if data['rate-limit'] is not None else ""
+    if 'session-timeout' in data:
+        edit_payload['session-timeout'] = data['session-timeout'] if data['session-timeout'] is not None else ""
+    if 'shared-users' in data:
+         edit_payload['shared-users'] = data['shared-users'] if data['shared-users'] is not None and data['shared-users'] != "" else None # Send as string or None
+
+
+    if not edit_payload: # Nothing to update if all fields were empty or not present
+         return jsonify({'success': False, 'message': _('No valid update data provided.')}), 400
+
+    success, message = router_os_service.edit_hotspot_profile(profile_id, edit_payload)
+    if success:
+        audit_logger.info(f"EVENT: ProfileEditSuccess; ADMIN: {current_user.id}; TARGET_PROFILE_ID: {profile_id}; PAYLOAD: {edit_payload}")
+    else:
+        audit_logger.error(f"EVENT: ProfileEditFailure; ADMIN: {current_user.id}; TARGET_PROFILE_ID: {profile_id}; PAYLOAD: {edit_payload}; REASON: {message}")
     return jsonify({'success': success, 'message': message})
 
 @app.route('/api/profiles/<profile_id>', methods=['DELETE'])
 @login_required
 def delete_profile_route(profile_id: str):
+    # It would be good to log the name of the profile as well, if easily available before deletion
+    # For now, just log the ID.
     success, message = router_os_service.delete_hotspot_profile(profile_id)
+    if success:
+        audit_logger.info(f"EVENT: ProfileDeleteSuccess; ADMIN: {current_user.id}; TARGET_PROFILE_ID: {profile_id}")
+    else:
+        audit_logger.error(f"EVENT: ProfileDeleteFailure; ADMIN: {current_user.id}; TARGET_PROFILE_ID: {profile_id}; REASON: {message}")
     return jsonify({'success': success, 'message': message})
+
+# --- Bulk User Action Routes ---
+@app.route('/api/users/bulk-enable', methods=['POST'])
+@login_required
+def bulk_enable_users():
+    data = request.json
+    usernames = data.get('usernames', [])
+    if not usernames or not isinstance(usernames, list):
+        return jsonify({'success': False, 'message': _('List of usernames is required.')}), 400
+
+    results = {'success_count': 0, 'failure_count': 0, 'details': []}
+    for username in usernames:
+        success, message = router_os_service.edit_hotspot_user(username, {'disabled': 'false'})
+        if success:
+            results['success_count'] += 1
+            audit_logger.info(f"EVENT: UserBulkEnableSuccess; ADMIN: {current_user.id}; TARGET_USER: {username}")
+        else:
+            results['failure_count'] += 1
+            results['details'].append({'username': username, 'error': message})
+            audit_logger.error(f"EVENT: UserBulkEnableFailure; ADMIN: {current_user.id}; TARGET_USER: {username}; REASON: {message}")
+
+    final_message = _("Enabled {0} users. Failed: {1}.").format(results['success_count'], results['failure_count'])
+    if results['failure_count'] > 0:
+         final_message += " " + _("Check details for errors.")
+    return jsonify({'success': results['failure_count'] == 0, 'message': final_message, 'details': results['details']})
+
+@app.route('/api/users/bulk-disable', methods=['POST'])
+@login_required
+def bulk_disable_users():
+    data = request.json
+    usernames = data.get('usernames', [])
+    if not usernames or not isinstance(usernames, list):
+        return jsonify({'success': False, 'message': _('List of usernames is required.')}), 400
+
+    results = {'success_count': 0, 'failure_count': 0, 'details': []}
+    for username in usernames:
+        success, message = router_os_service.edit_hotspot_user(username, {'disabled': 'true'})
+        if success:
+            results['success_count'] += 1
+            audit_logger.info(f"EVENT: UserBulkDisableSuccess; ADMIN: {current_user.id}; TARGET_USER: {username}")
+        else:
+            results['failure_count'] += 1
+            results['details'].append({'username': username, 'error': message})
+            audit_logger.error(f"EVENT: UserBulkDisableFailure; ADMIN: {current_user.id}; TARGET_USER: {username}; REASON: {message}")
+
+    final_message = _("Disabled {0} users. Failed: {1}.").format(results['success_count'], results['failure_count'])
+    if results['failure_count'] > 0:
+         final_message += " " + _("Check details for errors.")
+    return jsonify({'success': results['failure_count'] == 0, 'message': final_message, 'details': results['details']})
+
+@app.route('/api/users/bulk-change-profile', methods=['POST'])
+@login_required
+def bulk_change_profile_users():
+    data = request.json
+    usernames = data.get('usernames', [])
+    new_profile = data.get('profile')
+
+    if not usernames or not isinstance(usernames, list):
+        return jsonify({'success': False, 'message': _('List of usernames is required.')}), 400
+    if not new_profile:
+        return jsonify({'success': False, 'message': _('New profile name is required.')}), 400
+
+    # Validate new_profile name
+    err = validate_string(new_profile, _('New Profile Name'), min_len=1, max_len=63)
+    if err:
+        return jsonify({'success': False, 'message': err}), 400
+
+    results = {'success_count': 0, 'failure_count': 0, 'details': []}
+    for username in usernames:
+        success, message = router_os_service.edit_hotspot_user(username, {'profile': new_profile})
+        if success:
+            results['success_count'] += 1
+            audit_logger.info(f"EVENT: UserBulkChangeProfileSuccess; ADMIN: {current_user.id}; TARGET_USER: {username}; NEW_PROFILE: {new_profile}")
+        else:
+            results['failure_count'] += 1
+            results['details'].append({'username': username, 'error': message})
+            audit_logger.error(f"EVENT: UserBulkChangeProfileFailure; ADMIN: {current_user.id}; TARGET_USER: {username}; NEW_PROFILE: {new_profile}; REASON: {message}")
+
+    final_message = _("Changed profile for {0} users to '{1}'. Failed: {2}.").format(results['success_count'], new_profile, results['failure_count'])
+    if results['failure_count'] > 0:
+         final_message += " " + _("Check details for errors.")
+    return jsonify({'success': results['failure_count'] == 0, 'message': final_message, 'details': results['details']})
+
+@app.route('/api/users/bulk-delete', methods=['POST'])
+@login_required
+def bulk_delete_users():
+    data = request.json
+    usernames = data.get('usernames', [])
+    if not usernames or not isinstance(usernames, list):
+        return jsonify({'success': False, 'message': _('List of usernames is required.')}), 400
+
+    results = {'success_count': 0, 'failure_count': 0, 'details': []}
+    for username in usernames:
+        success, message = router_os_service.delete_hotspot_user(username)
+        if success:
+            results['success_count'] += 1
+            audit_logger.info(f"EVENT: UserBulkDeleteSuccess; ADMIN: {current_user.id}; TARGET_USER: {username}")
+        else:
+            results['failure_count'] += 1
+            results['details'].append({'username': username, 'error': message})
+            audit_logger.error(f"EVENT: UserBulkDeleteFailure; ADMIN: {current_user.id}; TARGET_USER: {username}; REASON: {message}")
+
+    final_message = _("Deleted {0} users. Failed: {1}.").format(results['success_count'], results['failure_count'])
+    if results['failure_count'] > 0:
+         final_message += " " + _("Check details for errors.")
+    return jsonify({'success': results['failure_count'] == 0, 'message': final_message, 'details': results['details']})
+
 
 # --- UNIFIED EXPORT ROUTE ---
 @app.route('/api/export-users', methods=['GET'])
@@ -1575,3 +2158,40 @@ if __name__ == '__main__':
     print("="*40)
     print(f"\n✅ {_('Dashboard available at:')} http://{server_config['host']}:{server_config['port']}")
     app.run(host=server_config['host'], port=server_config['port'], debug=server_config['debug'])
+
+# --- CLI Commands ---
+@app.cli.command("init-db")
+def init_db_command():
+    """Creates the database tables."""
+    db.create_all()
+    logger.info("Initialized the database.")
+    print("Initialized the database.")
+
+@app.cli.command("create-admin")
+@click.option('--username', prompt="Admin username", help="The username for the admin account.")
+@click.option('--password', prompt=True, hide_input=True, confirmation_prompt=True, help="The password for the admin account.")
+def create_admin_command(username, password):
+    """Creates or updates the admin user."""
+    # Ensure tables are created
+    db.create_all() # Safe to call multiple times
+
+    admin = DashboardAdmin.query.filter_by(username=username).first()
+    if admin:
+        if click.confirm(f"Admin user '{username}' already exists. Do you want to update the password?", default=False):
+            admin.set_password(password)
+            db.session.commit()
+            logger.info(f"Admin user '{username}' password updated.")
+            print(f"Admin user '{username}' password updated.")
+            audit_logger.info(f"EVENT: AdminUserPasswordUpdate; TARGET_USER: {username}; EXECUTOR: CLI")
+        else:
+            print("Admin user password not updated.")
+    else:
+        admin = DashboardAdmin(username=username)
+        admin.set_password(password)
+        db.session.add(admin)
+        db.session.commit()
+        logger.info(f"Admin user '{username}' created.")
+        print(f"Admin user '{username}' created.")
+        audit_logger.info(f"EVENT: AdminUserCreate; TARGET_USER: {username}; EXECUTOR: CLI")
+
+# Need to import click for the CLI commands # Moved to top
